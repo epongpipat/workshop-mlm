@@ -1,0 +1,1005 @@
+---
+title: "Multi-Level Modeling (MLM)"
+author: "Ekarin E. Pongpipat"
+format: 
+  revealjs:
+    smaller: true
+    slide-number: true
+    theme: moon
+    highlight-style: atom-one-dark
+    controls-layout: bottom-right
+    navigation-mode: vertical
+    footer: "@epongpipat"
+editor: visual
+---
+
+# Review
+
+::: {.notes}
+If you have any questions, please just stop me. I prefer answering questions as they come up.
+
+Before I go over multi-level modeling, I want to review some information that I think is helpful in understanding it.
+:::
+
+```{r}
+pkgs <- c('rHelperKennedyRodrigue', 'glue', 'dplyr', 'broom', 'lmerTest', 'broomExtra',
+          'ggplot2', 'stringr', 'tidyr', 'eepR', 'tibble', 'interactions', 'Matrix', 'fastDummies', 'DiagrammeR')
+xfun::pkg_attach2(pkgs, message = F)
+options(scipen=999)
+```
+
+```{r}
+root_dir <- get_root_dir()
+in_paths <- list()
+in_paths['long'] <- glue("{root_dir}/shared/Projects/eep170030/proj-assistance/tutorial-lme/data/data_long-format.csv")
+in_paths['wide'] <- glue("{root_dir}/shared/Projects/eep170030/proj-assistance/tutorial-lme/data/data_wide-format.csv")
+```
+
+```{r}
+for (key in names(in_paths)) {
+  if (!file.exists(in_paths[[key]])) {
+    stop(glue("error: file does not exist ({key}: {in_paths[[key]]}"))
+  }
+}
+```
+
+```{r}
+df_long <- read.csv(in_paths[['long']]) %>%
+  mutate(female = ifelse(sex == 'F', 1, 0))
+df_wide <- read.csv(in_paths[['wide']])
+```
+
+## Assumptions
+
+::: {.notes}
+
+The first thing to know about all linear models is that error is assumed to be normal and independent or random
+
+:::
+
+-   Error is normal
+-   Error is independent (random)
+
+```{r}
+x <- seq(-5, 5, .1)
+y <- dnorm(x)
+df_fig <- data.frame(x = x,
+                     y = y)
+ggplot(df_fig, aes(x, y)) +
+  geom_line() +
+  theme_minimal() +
+  labs(x = NULL,
+       y = NULL)
+```
+
+## Data
+
+::: {.notes}
+
+So, let's take a look at how we properly ensure error is independent with two time points. Let's say that we are interested in the effect of aging -- using wave -- on digit span (sequence)?
+
+:::
+
+- Two time points per person
+- Is there an effect of aging (using wave) on digit span (sequence)?
+
+```{r}
+df_wide_2ses <- df_wide[, c('sub', 'ds_s_w1', 'ds_s_w2', 'age_w1', 'age_w2')]
+df_wide_2ses <- na.omit(df_wide_2ses)
+df_long_2ses <- df_wide_2ses %>%
+  pivot_longer(cols = -sub, names_to = c(".value", 'ses'), names_pattern = "(.*)_w(.*)") %>%
+  mutate(ses = str_remove(ses, 'ds_s_w'),
+         wave = case_when(
+           ses == 1 ~ -0.5,
+           ses == 2 ~ 0.5
+         )) %>%
+  left_join(df_wide_2ses[, c('sub', 'age_w1')], by = 'sub') %>%
+  mutate(time = age - age_w1)
+nice_table(head(df_long_2ses[, c('sub', 'ses', 'wave', 'ds_s')]))
+```
+
+## t-test
+
+::: {.notes}
+If we were to properly perform the t-test, we would want to run a dependent samples t-test. The dependent samples t-test takes the difference between the two waves and examines if it is different than 0.
+:::
+
+```{r}
+model_fits <- list()
+```
+
+::: columns
+
+::: {.column width="50%"}
+Accounting for subject
+
+(dependent samples t-test)
+
+<br>
+
+$$ 
+DS_{S_{W2_i}} - DS_{S_{W1_i}} = \beta_0 + \epsilon_i
+$$
+
+<br>
+
+```{r}
+model_fits[['correct']] <- lm(ds_s_w2 - ds_s_w1 ~ 1, df_wide_2ses)
+tidy(model_fits[['correct']])
+```
+:::
+
+::: {.column width="50%"}
+Incorrectly ignoring subject
+
+(independent samples t-test)
+
+<br>
+
+$$ 
+DS_{S_{t_i}} = \beta_0 + \beta_1*Wave_{t_i} + \epsilon_i
+$$
+
+<br>
+
+```{r}
+model_fits[['wrong']] <- lm(ds_s ~ 1 + wave, df_long_2ses)
+tidy(model_fits[['wrong']])
+```
+:::
+
+
+:::
+
+<br>
+
+-   Same estimate
+-   Error is wrong in the independent samples t-test (subsequently, t-statistic and p-value)
+    -   Error is not independent since measures within the same subjects are correlated
+
+## Beyond repeated-measures
+
+-   What happens if you have more than two time points?
+    -   Repeated Measures GLM (ANOVA/Regression) and MLM
+-   However, MLM also allows for missing data points and accounts for multiple sources of error
+
+## Definitions
+
+-   **Multi-Level Modeling (MLM)**
+
+-   Also known as:
+
+    -   Hierarchical Linear Modeling (HLM)
+        -   Not to be confused with Hierarchical Regression
+    -   Linear Mixed Effects (LME)
+    -   Mixed Effects Modeling
+
+## Definitions
+
+-   Variables can vary **within** and vary **between** levels/clusters
+-   Dependent variables must vary **both within and between** levels
+-   Independent variables can vary **both within and between** levels or **only between** levels
+    -   IVs that vary **within and between** levels are called **random**
+    -   IVs that vary **only between** the highest level are called **fixed**
+
+# Our Longitudinal Data
+
+## Example #1: 2 Levels
+
+Multiple cognitive measures or MRI data over time for each individual
+
+-   Level 1: Subject-Level
+    -   Multiple measures across time
+-   Level 2: Group-Level
+    -   Multiple subjects
+
+```{r}
+grViz("
+digraph boxes_and_circles {
+
+  # a 'graph' statement
+  graph [overlap = true, fontsize = 10]
+
+  node [shape = circle,
+        fixedsize = true,
+        width = 0.9] // sets as circles
+  'subj 1'; 'subj 2'; 'subj ..'; 'subj i';
+
+  # several 'edge' statements
+  'subj 1' -> 'subj 1\ntime 1' 
+  'subj 1' -> 'subj 1\ntime 2' 
+  'subj 1' -> 'subj 1\ntime ..' 
+  'subj 1' -> 'subj 1\ntime t' 
+  
+  'subj 2' -> 'subj 2\ntime 1' 
+  'subj 2' -> 'subj 2\ntime 2' 
+  'subj 2' -> 'subj 2\ntime ..' 
+  'subj 2' -> 'subj 2\ntime t' 
+  
+  'subj ..' -> 'subj ..\ntime 1' 
+  'subj ..' -> 'subj ..\ntime 2' 
+  'subj ..' -> 'subj ..\ntime ..' 
+  'subj ..' -> 'subj ..\ntime t' 
+  
+  'subj i' -> 'subj t\ntime 1' 
+  'subj i' -> 'subj t\ntime 2' 
+  'subj i' -> 'subj t\ntime ..' 
+  'subj i' -> 'subj t\ntime t' 
+}
+")
+```
+
+## Example #2: 3 levels levels
+
+Multiple related data points within an individual's wave collected over multiple waves
+
+-   Level 1: Within wave
+    -   Multiple related data points within a wave/time (e.g., accuracies across n-back load)
+-   Level 2: Within subject (between waves/times)
+    -   Multiple measures over time
+-   Level 3: Between subjects
+    -   Multiple subjects
+
+```{r}
+grViz("
+digraph boxes_and_circles {
+
+  # a 'graph' statement
+  graph [overlap = true, fontsize = 10]
+
+  node [shape = circle,
+        fixedsize = true,
+        width = 0.9] // sets as circles
+  'subj 1'; 
+
+  # several 'edge' statements
+  'subj 1' -> 'subj 1\ntime 1' 
+  'subj 1' -> 'subj 1\ntime ..' 
+  'subj 1' -> 'subj 1\ntime t' 
+  'subj 1\ntime 1' -> 'subj 1\ntime 1\n0-back' 
+  'subj 1\ntime 1' -> 'subj 1\ntime 1\n2-back'
+  'subj 1\ntime 1' -> 'subj 1\ntime 1\n3-back' 
+  'subj 1\ntime 1' -> 'subj 1\ntime 1\n4-back' 
+  'subj 1\ntime ..' -> 'subj 1\ntime ..\n0-back' 
+  'subj 1\ntime ..' -> 'subj 1\ntime ..\n2-back'
+  'subj 1\ntime ..' -> 'subj 1\ntime ..\n3-back' 
+  'subj 1\ntime ..' -> 'subj 1\ntime ..\n4-back' 
+  'subj 1\ntime t' -> 'subj 1\ntime t\n0-back' 
+  'subj 1\ntime t' -> 'subj 1\ntime t\n2-back'
+  'subj 1\ntime t' -> 'subj 1\ntime t\n3-back' 
+  'subj 1\ntime t' -> 'subj 1\ntime t\n4-back'
+  'subj i' -> 'subj i\ntime 1' 
+  'subj i' -> 'subj i\ntime ..' 
+  'subj i' -> 'subj i\ntime t' 
+  'subj i\ntime 1' -> 'subj i\ntime 1\n0-back' 
+  'subj i\ntime 1' -> 'subj i\ntime 1\n2-back'
+  'subj i\ntime 1' -> 'subj i\ntime 1\n3-back' 
+  'subj i\ntime 1' -> 'subj i\ntime 1\n4-back' 
+  'subj i\ntime ..' -> 'subj i\ntime ..\n0-back' 
+  'subj i\ntime ..' -> 'subj i\ntime ..\n2-back'
+  'subj i\ntime ..' -> 'subj i\ntime ..\n3-back' 
+  'subj i\ntime ..' -> 'subj i\ntime ..\n4-back' 
+  'subj i\ntime t' -> 'subj i\ntime t\n0-back' 
+  'subj i\ntime t' -> 'subj i\ntime t\n2-back'
+  'subj i\ntime t' -> 'subj i\ntime t\n3-back' 
+  'subj i\ntime t' -> 'subj i\ntime t\n4-back'
+  
+}")
+```
+
+# Error
+
+## Multiple Sources of Error
+
+-   General linear models (e.g., regression, ANOVA, etc.) only accounts for a single source of model error
+
+$$
+DV_i = \beta_0 + \beta_1 * X_i + \epsilon
+$$
+
+-   MLM allows us to account for variability/error within and between different levels
+
+-   Level 1: Within-Subject
+
+$$
+DV_{t_i} = \beta_{0_i} + \beta_{1_i} * Time_{t_i} + r_{t_i}
+$$
+
+-   Level 2: Between-Subjects
+
+$$
+\beta_{0_i} = \gamma_{00} + \gamma_{01} * Age_{W1_i} + \mu_{0_i}
+$$
+
+$$
+\beta_{1_i} = \gamma_{10} + \gamma_{11} * Age_{W1_i} + \mu_{1_i}
+$$
+
+## Error
+
+Level 1
+
+$$
+r_{t_i} = N(0, \sigma^2)
+$$
+
+Level 2
+
+$$
+\mu_{t_i} = N(0, \tau_{t_i})
+$$
+
+Level 2 Expanded:
+
+$$
+\begin{bmatrix}
+  \mu_{0_i}\\
+  \mu_{1_i}
+\end{bmatrix} = N
+\begin{pmatrix}
+  0, \tau_{00}^2\ \ \tau_{01}\\
+  0, \tau_{01}\ \ \tau_{10}^2
+\end{pmatrix}
+$$
+
+Errors within a subject are normal and variance-covariance of errors between subjects are also normal
+
+# Steps
+
+1.  Define model
+
+2.  Data processing
+
+3.  Run model
+
+4.  Review model
+
+5.  Visualize model
+
+# Getting Started
+
+## Packages
+
+```{r}
+#| echo: true
+#| eval: false
+library(dplyr)          # data wrangling
+library(lmerTest)       # to run lme
+library(interactions)   # to plot interactions
+```
+
+```{r}
+#| echo: false
+library(Matrix)         # to get tau
+```
+
+## Our Example Data
+
+```{r}
+df_long_2ses <- df_long %>%
+  filter(ses <= 2)
+nice_table(head(df_long))
+```
+
+# Example #1
+
+## Example #1
+
+Time Points: 2
+
+```{r}
+data.frame(variable = c('intercept', 'time'),
+           effect = c('random', 'fixed'),
+           varies = c('within subject', 'between subjects')) %>%
+  nice_table()
+```
+
+```{r}
+df_fig <- data.frame(sub = NA,
+                 time = NA,
+                 dv = NA)
+idx <- 1
+for (i in 1:5) {
+  b0 <- sample(seq(5, 9, 0.5), 1)
+  b1 <- rep(-0.5, 1)
+  y <- b0 + b1 * 4
+  df_fig[idx, 'sub'] <- i
+  df_fig[idx, 'time'] <- 0
+  df_fig[idx, 'dv'] <- b0
+  idx <- idx + 1
+  df_fig[idx, 'sub'] <- i
+  df_fig[idx, 'time'] <- 4
+  df_fig[idx, 'dv'] <- y
+  idx <- idx + 1
+}
+ggplot(df_fig, aes(time, dv, group = sub)) +
+  geom_line() +
+  theme_minimal()
+```
+
+## Define
+
+Level 1
+
+$$
+DS\_S = \beta_{0_i} + r_{i_t}
+$$
+
+<br>
+
+Level 2
+
+$$
+\beta_{0_i} = \gamma_{00} + \gamma_{01} * Time_i + \mu_{0_i}
+$$
+
+Full Model
+
+$$
+\begin{align}
+DS\_S_{t_i} & =  (\gamma_{00} + \gamma_{01} * Time_i + \mu_{0_i}) + r_{t_i} \\
+& =  \gamma_{00} + \gamma_{01} * Time_i + \mu_{0_i} + r_{t_i}
+\end{align}
+$$
+
+## Mean-Center
+
+```{r}
+#| echo: true
+#| code-line-numbers: "2"
+df_long_2ses <- df_long_2ses %>%
+  mutate(time_mc = scale(time, scale = F))
+```
+
+```{r}
+nice_table(head(df_long_2ses))
+```
+
+typically, mean-center if there is an interaction (unless if your variable and estimate are meaningful at 0).
+
+## Run
+
+General format:
+
+```{r}
+#| echo: true
+#| eval: false
+model_fit <- lmer(dv ~ full_model + (level_1_model | id), data)
+```
+
+<br>
+
+Code:
+
+```{r}
+#| echo: true
+model_fit <- lmer(ds_s ~ time_mc + (1 | sub), df_long_2ses)
+```
+
+## Review
+
+```{r}
+#| echo: true
+summary(model_fit)
+```
+
+## Review
+
+```{r}
+#| echo: true
+b <- coef(model_fit)[[1]]
+head(b)
+```
+
+<br>
+
+```{r}
+#| echo: true
+mean(b[, '(Intercept)'])
+```
+
+
+## Visualize
+
+```{r}
+df_b <- data.frame(coef(model_fit)$sub) %>%
+  rownames_to_column(var = 'sub') %>%
+  mutate(sub = as.integer(sub))
+colnames(df_b)[2:3] <- c('b0', 'b1')
+df_fig <- df_long_2ses %>%
+  left_join(df_b, by = 'sub') %>%
+  mutate(y_pred = b0 + b1 * (time_mc + mean(df_long_2ses$time)),
+         sub = as.character(sub))
+ggplot(df_fig, aes(time, ds_s, color = sub)) +
+  geom_point() +
+  geom_line(aes(time, y_pred)) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, 99, 1)) +
+  scale_y_continuous(breaks = seq(0, 40, 2)) +
+  theme(legend.position="none")
+```
+
+The slope is the same, but the intercept is different (random/varies within subject)
+
+# Example #2
+
+## Example #2
+
+Time Points: 2
+
+```{r}
+data.frame(variable = c('intercept', 'time'),
+           effect = c('fixed', 'random'),
+           varies = c('between subjects', 'varies subject')) %>%
+  nice_table()
+```
+
+```{r}
+df_fig <- data.frame(sub = NA,
+                 time = NA,
+                 dv = NA)
+idx <- 1
+for (i in 1:5) {
+  b0 <- 5
+  b1 <- sample(seq(-0.5, 0, 0.1), 1)
+  y <- b0 + b1 * 4
+  df_fig[idx, 'sub'] <- i
+  df_fig[idx, 'time'] <- 0
+  df_fig[idx, 'dv'] <- b0
+  idx <- idx + 1
+  df_fig[idx, 'sub'] <- i
+  df_fig[idx, 'time'] <- 4
+  df_fig[idx, 'dv'] <- y
+  idx <- idx + 1
+}
+ggplot(df_fig, aes(time, dv, group = sub)) +
+  geom_line() +
+  theme_minimal()
+```
+
+## Define
+
+Level 1
+
+$$
+DS\_S_{t_i} = \beta_{0_i} + \beta_{1_i} * Time_{t_i} + r_{t_i}
+$$
+
+<center>where $\beta_0 = 0$</center>
+
+Level 2
+
+$$
+\beta_{0_i} = \gamma_{00} + \mu_{0_i}
+$$
+
+$$
+\beta_{1_i} = \gamma_{10} + \mu_{1_i}
+$$
+
+Full Model
+
+$$
+\begin{align}
+DS\_S_{t_i} & = (\gamma_{00} + \mu_{0_i}) + (\gamma_{10} + \mu_{1_i}) + r_{t_i} \\
+& = \gamma_{00} + \gamma_{10} + r_{i_t} + \mu_{0_i} + \mu_{1_i}
+\end{align}
+$$
+
+## Run
+
+```{r}
+#| echo: true
+model_fit <- lmer(ds_s ~ time_mc + (0 + time_mc | sub), df_long_2ses)
+```
+
+Note: R automatically includes to the intercept and we have to explicitly state 0 to have a fixed intercept
+
+## Review
+
+```{r}
+#| echo: true
+summary(model_fit)
+```
+
+## Review
+
+```{r}
+#| echo: true
+b <- coef(model_fit)[[1]]
+head(b)
+```
+
+```{r}
+#| echo: false
+#| eval: false
+(tau <- bdiag(VarCorr(model_fit)))
+```
+
+## Visualize
+
+```{r}
+df_b <- data.frame(coef(model_fit)$sub) %>%
+  rownames_to_column(var = 'sub') %>%
+  mutate(sub = as.integer(sub))
+colnames(df_b)[2:3] <- c('b0', 'b1')
+df_fig <- df_long_2ses %>%
+  left_join(df_b, by = 'sub') %>%
+  mutate(y_pred = b0 + b1 * (time_mc + mean(df_long_2ses$time)),
+         sub = as.character(sub))
+ggplot(df_fig, aes(time, ds_s, color = sub)) +
+  geom_point() +
+  geom_line(aes(time, y_pred)) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, 99, 1)) +
+  scale_y_continuous(breaks = seq(0, 40, 2)) +
+  theme(legend.position="none")
+```
+
+# Example #3
+
+## Example #3
+
+Time Points: 2
+
+```{r}
+data.frame(variable = c('intercept', 'time', 'age_w1'),
+           effect = c('fixed', 'random', 'fixed'),
+           varies = c('between subject', 'within subject', 'between subjects')) %>%
+  nice_table()
+```
+
+## Define
+
+Level 1
+
+$$
+DS\_S_{i_t} = \beta_{0_i} + \beta_{1_i} * Time_{i_t} + r_{i_t}
+$$
+
+<center>where $\beta_0 = 0$</center>
+
+Level 2
+
+$$
+\beta_{0_i} = \gamma_{00} + \gamma_{01} * Age_{W1_i} + \mu_{0_i}
+$$
+
+$$
+\beta_{1_i} = \gamma_{10} + \gamma_{11} * Age_{W1_i} + \mu_{1_i}
+$$
+
+Full Model
+
+$$
+\begin{align}
+\begin{split}
+DS\_S_{i_t} &= (\gamma_{00} + \gamma_{01} * Age_{W1_i} + \mu_{0_i}) + (\gamma_{10} + \gamma_{11} * Age_{W1_i} + \mu_{1_i})*Time_{t_i} + r_{i_t} \\
+ &= \gamma_{00} + \gamma_{01} * Age_{W1_i}  + \gamma_{10}*Time_{t_i} + \gamma_{11} * Age_{W1_i} *Time_{t_i} \\
+ &\qquad + r_{i_t} + \mu_{0_i} + \mu_{1_i}
+\end{split}
+\end{align}
+$$\
+
+## Mean-Center
+
+```{r}
+#| echo: true
+#| code-line-numbers: "1|3"
+m_age_w1 <- mean(subset(df_long_2ses, ses == 1)$age)
+df_long_2ses <- df_long_2ses %>%
+  mutate(age_w1_mc = age_w1 - m_age_w1)
+```
+
+```{r}
+nice_table(head(df_long_2ses))
+```
+
+## Run
+
+```{r}
+#| echo: true
+model_fit <- lmer(ds_s ~ time_mc * age_w1_mc + (0 + time_mc | sub), df_long_2ses)
+```
+
+Note: R automatically includes to the intercept and we have to explicitly state 0 to have a fixed intercept
+
+## Review
+
+```{r}
+#| echo: true
+summary(model_fit)
+```
+
+## Review
+
+```{r}
+#| echo: true
+b <- coef(model_fit)[[1]]
+head(b)
+```
+
+```{r}
+#| echo: false
+#| eval: false
+(tau <- bdiag(VarCorr(model_fit)))
+```
+
+## Visualize
+
+```{r}
+#| echo: true
+# re-run without centering for interactions plot only
+model_fit_fig <- lmer(ds_s ~ time * age_w1 + (0 + time | sub), df_long_2ses) 
+interact_plot(model_fit_fig, pred = time, modx = age_w1, plot.points = TRUE) +
+  scale_x_continuous(breaks = seq(0, 20, 1))
+```
+
+## Visualize
+
+```{r}
+b <- subset(broomExtra::tidy(model_fit), effect == 'fixed')$estimate
+df_pred <- data.frame(age_w1_mc = unique(sort(df_long_2ses$age_w1_mc))) %>%
+  mutate(y_pred = b[1] + b[3] * age_w1_mc)
+ggplot(df_long_2ses, aes(age_w1, ds_s)) +
+  geom_point() +
+  geom_line(data = df_pred, mapping = aes(age_w1_mc + m_age_w1, y_pred), size = 1.5) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, 100, 10))
+
+
+# df_b <- b
+# colnames(df_b) <- glue("b{0:(ncol(df_b)-1)}")
+# df_b <- df_b %>%
+  # rownames_to_column('sub')
+# df_x <- df_long_2ses %>%
+#   filter(time == 0) %>%
+#   select(sub, ds_s, age_w1, age_w1_mc, time_mc) %>%
+#   mutate(sub = as.character(sub))
+# df_pred <- full_join(df_b, df_x) %>%
+#   mutate(y_pred = b0 + b2 * (age_w1_mc))
+# ggplot(df_pred, aes(age_w1, ds_s)) +
+#   geom_point() +
+#   geom_line(aes(age_w1, y_pred), size = 1.5) +
+#   theme_minimal() +
+#   scale_x_continuous(breaks = seq(0, 100, 10))
+```
+
+# Example #4
+
+## Example #4
+
+Time Points: 3
+
+```{r}
+data.frame(variable = c('intercept', 'time', 'age_w1', 'sex'),
+           effect = c('random', 'random', 'fixed', 'fixed'),
+           varies = c('within subject', 'within subject', 'between subjects', 'between subjects')) %>%
+  nice_table()
+```
+
+## Define
+
+Level 1
+
+$$
+DS\_S_{t_i} = \beta_{0_i} + \beta_{1_i} * Time_{t_i} + r_{t_i}
+$$
+
+Level 2
+
+$$
+\beta_{0_i} = \gamma_{00} + \gamma_{01} * Age_{W1_i} + \gamma_{02} * Sex_i + \gamma_{03} * Age_{W1_i} * Sex_i + \mu_{0_i}
+$$
+
+$$
+\beta_{1_i} = \gamma_{10} + \gamma_{11} * Age_{W1_i} + \gamma_{12} * Sex_i + \gamma_{13} * Age_{W1_i} * Sex_i + \mu_{1_i}
+$$
+
+Full Model
+
+$$
+\begin{split}
+DS\_S_{i_t} &= (\gamma_{00} + \gamma_{01} * Age_{W1_i} + \gamma_{02} * Sex_i + \gamma_{03} * Age_{W1_i} * Sex_i + \mu_{0_i}) \\
+&\qquad + (\gamma_{10} + \gamma_{11} * Age_{W1_i} + \gamma_{12} * Sex_i + \gamma_{13} * Age_{W1_i} * Sex_i + \mu_{1_i}) * Time_{i_t} \\
+&\qquad + r_{i_t}
+\end{split}
+$$
+
+## Define
+
+Full Model
+
+$$
+\begin{align}
+\begin{split}
+DS\_S_{i_t} & = (\gamma_{00} + \gamma_{01} * Age_{W1_i} + \gamma_{02} * Sex_i + \gamma_{03} * Age_{W1_i} * Sex_i + \mu_{0_i}) \\
+&\qquad + (\gamma_{10} + \gamma_{11} * Age_{W1_i} + \gamma_{12} * Sex_i + \gamma_{13} * Age_{W1_i} * Sex_i + \mu_{1_i}) * Time_{i_t} \\
+&\qquad + r_{i_t} \\
+& = \gamma_{00} + \gamma_{01} * Age_{W1_i} + \gamma_{02} * Sex_i + \gamma_{03} * Age_{W1_i} * Sex_i  \\ 
+&\qquad + \gamma_{10} * Time_{i_t} + \gamma_{11} * Age_{W1_i}  * Time_{i_t} + \gamma_{12} * Sex_i * Time_{i_t} \\
+&\qquad + \gamma_{13} * Age_{W1_i} * Sex_i * Time_{i_t} \\
+&\qquad + r_{i_t}  + \mu_{0_i} + \mu_{1_i}
+\end{split}
+\end{align}
+$$
+
+## Run
+
+```{r}
+#| echo: true
+df_long <- df_long %>%
+  mutate(age_w1_mc = age_w1 - m_age_w1,
+         time_mc = scale(time, scale = F),
+         female_c = ifelse(sex == 'F', 0.5, -0.5))
+head(df_long)
+```
+
+```{r}
+df_long <- df_long %>%
+  group_by(sub) %>%
+  mutate(n_ses = n()) %>%
+  ungroup() %>%
+  filter(n_ses >= 2)
+```
+
+```{r}
+#| echo: true
+model_fit <- lmer(ds_s ~ time_mc * age_w1_mc * female_c + (1 + time_mc | sub), df_long)
+```
+
+## Review
+
+```{r}
+#| echo: true
+summary(model_fit)
+```
+
+## Review
+
+```{r}
+#| echo: true
+b <- coef(model_fit)[[1]]
+head(b)
+```
+
+<br>
+
+```{r}
+#| echo: false
+#| eval: false
+(tau <- bdiag(VarCorr(model_fit)))
+```
+
+## Visualize
+
+```{r}
+#| echo: true
+model_fit_fig <- lmer(ds_s ~ time * age_w1 * sex + (1 + time_mc | sub), df_long)
+interact_plot(model_fit_fig, pred = time, modx = age_w1, mod2 = sex, plot.points = TRUE) +
+  scale_x_continuous(breaks = seq(0, 20, 1))
+```
+
+## Visualize
+
+```{r}
+b <- subset(tidy(model_fit), effect == 'fixed')$estimate
+df_pred <- data.frame(age_w1_mc = unique(sort(df_long$age_w1_mc))) %>%
+  mutate(y_pred = b[1] + b[3] * age_w1_mc)
+ggplot(df_long, aes(age_w1, ds_s)) +
+  geom_point() +
+  geom_line(data = df_pred, mapping = aes(age_w1_mc + m_age_w1, y_pred), size = 1.5) +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, 100, 10))
+```
+
+# Missingness
+
+```{r}
+tribble(
+  ~"", ~type, ~abbreviation, ~definition, ~note,
+  1, "Missing Completely at Random", "MCAR", "Truly random process", "Ideal",
+  2, "Missing at Random", "MAR", "Not completely missing at random and missingness is a measured/predictable process", "OK",
+  3, "Missing Not at Random", "MNAR", "Not missing at random, and unmeasured/unpredictable", "Bad",
+) %>% nice_table()
+```
+
+# Pattern Mixture Modeling
+
+## Pattern Mixture Modelling
+
+"Extension" of MLM by including a missingness variable
+
+-   Create contrast variables of missingness pattern
+    -   Examples:
+        -   dummy-coded variable of complete observations
+        -   dummy-coded variable of missing last wave/session
+        -   number of waves/sessions
+        -   all missingness patterns
+-   Control for main effect missingness or determine if there is an interaction of variables with missingness
+
+## Example
+
+Let's incldue all patterns as control/nuisance variables
+
+In our case, we have 4 patterns of missing:
+
+1.  CCC - completed all waves
+2.  CCM - completed first two waves and missing last wave
+3.  CMC - completed first and third wave and missing second wave
+4.  CMM - completed first wave and missing last two waves
+
+## Create variables
+
+-   Create missing data patterns
+
+```{r}
+#| echo: true
+#| code-line-numbers: "|4|5|6|7|"
+df_missing <- df_wide %>%
+  filter(sub %in% df_long$sub) %>%
+  mutate(missing = case_when(
+    !is.na(time_w1) & !is.na(time_w2) & !is.na(time_w3) ~ 0,
+    !is.na(time_w1) & !is.na(time_w2) &  is.na(time_w3) ~ 1,
+    !is.na(time_w1) &  is.na(time_w2) & !is.na(time_w3) ~ 2,
+    !is.na(time_w1) &  is.na(time_w2) &  is.na(time_w3) ~ 3
+  )) %>%
+  select(sub, contains('missing'))
+head(df_missing)
+```
+
+<br>
+
+```{r}
+#| echo: true
+report::report(as.factor(df_missing$missing))
+```
+
+<br>
+
+```{r}
+#| echo: true
+# dummy code
+df_missing <- df_missing %>%
+  dummy_cols(select_columns = 'missing')
+head(df_missing)
+```
+
+## Run
+
+Combine
+
+```{r}
+#| echo: true
+# merge back to data
+df_long <- df_long %>%
+  left_join(df_missing, by = 'sub') #%>%
+  # filter(n_ses >= 2)
+```
+
+Run
+
+```{r}
+#| echo: true
+model_fit <- lmer(ds_s ~ time_mc * age_w1_mc * female_c + missing_1 + missing_2 + (1 + time_mc | sub), df_long)
+```
+
+## Review
+
+```{r}
+#| echo: true
+summary(model_fit)
+```
+
+# Warnings: isSingular
+
+    boundary (singular) fit: see ?isSingular
+
+-   Possibly, at least one of the variances within or correlations between the random effects is either 0 or ±1.
+    -   try setting the parameter of the covariance of the residuals ($tau_{01}$) to not be estimated `(1 + time || sub)`
+
+# References
+
+-   https://rpsychologist.com/r-guide-longitudinal-lme-lmer
+-   https://www.learn-mlms.com/index.html
+-   https://jeanettemumford.org/MixedModelSeries/
